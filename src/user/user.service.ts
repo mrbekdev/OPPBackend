@@ -9,6 +9,7 @@ export class UserService {
 
   async create(createUserDto: CreateUserDto) {
     const { login, password, firstName, lastName, phone } = createUserDto;
+    
 
     const existingUser = await this.prisma.user.findUnique({
       where: { login },
@@ -87,6 +88,7 @@ export class UserService {
     const existingUser = await this.prisma.user.findUnique({
       where: { id },
     });
+    console.log('Creating user with data:', updateUserDto);
 
     if (!existingUser) {
       throw new NotFoundException(`User with ID ${id} not found`);

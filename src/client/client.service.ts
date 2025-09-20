@@ -109,6 +109,31 @@ export class ClientService {
     };
   }
 
+  async updateRating(id: number, rating: string) {
+    const existingClient = await this.prisma.client.findUnique({
+      where: { id },
+    });
+
+    if (!existingClient) {
+      throw new NotFoundException(`Client with ID ${id} not found`);
+    }
+
+    // Validate rating value
+    if (rating && !['good', 'bad'].includes(rating)) {
+      throw new Error('Rating must be either "good" or "bad"');
+    }
+
+    const client = await this.prisma.client.update({
+      where: { id },
+      data: { rating: rating || null },
+    });
+
+    return {
+      message: 'Client rating updated successfully',
+      client,
+    };
+  }
+
   async remove(id: number) {
     const existingClient = await this.prisma.client.findUnique({
       where: { id },

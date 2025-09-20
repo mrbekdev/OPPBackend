@@ -46,6 +46,14 @@ export class ClientController {
     return this.clientService.update(id, updateClientDto);
   }
 
+  @Patch(':id/rating')
+  updateRating(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { rating: string },
+  ) {
+    return this.clientService.updateRating(id, body.rating);
+  }
+
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.clientService.remove(id);

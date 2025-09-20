@@ -29,15 +29,12 @@ export class OrderService {
   constructor(private prisma: PrismaService) {}
 
   async create(createOrderDto: CreateOrderDto) {
-    const { clientId, items, fromDate, toDate, taxPercent } = createOrderDto;
+    const { clientId, items, startDateTime, taxPercent, advancePayment } = createOrderDto;
 
-    const d1 = new Date(fromDate);
-    const d2 = new Date(toDate);
-    if (isNaN(d1.getTime()) || isNaN(d2.getTime())) {
-      throw new BadRequestException('Invalid dates provided for fromDate or toDate');
+    const startDate = new Date(startDateTime);
+    if (isNaN(startDate.getTime())) {
+      throw new BadRequestException('Invalid startDateTime provided');
     }
-    const ms = Math.max(0, d2.getTime() - d1.getTime());
-    const days = Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 
     const order = await this.prisma.$transaction(async (prisma) => {
       // Check if client exists
@@ -67,7 +64,8 @@ export class OrderService {
           );
         }
 
-        subtotal += item.quantity * product.price * days;
+        // Base price calculation - actual billing will be calculated on return
+        subtotal += item.quantity * product.price;
       }
 
       const tax = Math.round(subtotal * taxPercent / 100);
@@ -78,11 +76,13 @@ export class OrderService {
         data: {
           clientId,
           status: 'PENDING',
-          fromDate: d1,
-          toDate: d2,
+          fromDate: startDate,
+          toDate: null, // Will be set when returned
           subtotal,
+          advancePayment: advancePayment || 0,
           tax,
           total,
+          createdAt: startDate, 
         },
         include: {
           client: {
@@ -143,111 +143,121 @@ export class OrderService {
     };
   }
 
-async createWithCustomer(createOrderWithCustomerDto: CreateOrderWithCustomerDto) {
-  const { customer, items, fromDate, toDate, taxPercent } = createOrderWithCustomerDto;
-  const d1 = new Date(fromDate);
-  const d2 = new Date(toDate);
-  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) {
-    throw new BadRequestException('Invalid dates provided for fromDate or toDate');
-  }
-  const ms = Math.max(0, d2.getTime() - d1.getTime());
-  const days = Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
-  const order = await this.prisma.$transaction(async (prisma) => {
-    // Check if customer with this phone already exists
-    let client = await prisma.client.findFirst({
-      where: { phone: customer.phone },
-    });
-    // If client doesn't exist, create a new one
-    if (!client) {
-      client = await prisma.client.create({
-        data: {
-          firstName: customer.firstName,
-          lastName: customer.lastName,
-          phone: customer.phone,
-        },
-      });
+  async createWithCustomer(createOrderWithCustomerDto: CreateOrderWithCustomerDto) {
+    const { customer, items, startDateTime, taxPercent, advancePayment } = createOrderWithCustomerDto;
+    const startDate = new Date(startDateTime);
+    if (isNaN(startDate.getTime())) {
+      throw new BadRequestException('Invalid startDateTime provided');
     }
-    let subtotal = 0;
-    // Check if all products exist and have enough quantity, and calculate subtotal
-    for (const item of items) {
-      const product = await prisma.product.findUnique({
-        where: { id: item.productId },
+    const order = await this.prisma.$transaction(async (prisma) => {
+      // Check if customer with this phone already exists
+      let client = await prisma.client.findFirst({
+        where: { phone: customer.phone },
       });
-      if (!product) {
-        throw new NotFoundException(`Product with ID ${item.productId} not found`);
-      }
-      if (product.count < item.quantity) {
-        throw new BadRequestException(
-          `Product ${product.name} has only ${product.count} items in stock, but ${item.quantity} requested`,
-        );
-      }
-      subtotal += item.quantity * product.price * days;
-    }
-    const tax = Math.round(subtotal * taxPercent / 100);
-    const total = subtotal + tax;
-    // Create order with the existing or new customer
-    const newOrder = await prisma.order.create({
-      data: {
-        clientId: client.id,
-        status: 'PENDING',
-        fromDate: d1,
-        toDate: d2,
-        subtotal,
-        tax,
-        total,
-      },
-      include: {
-        client: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            phone: true,
+      
+      // If client doesn't exist, create a new one
+      if (!client) {
+        client = await prisma.client.create({
+          data: {
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            phone: customer.phone,
           },
-        },
-      },
-    });
-    // Create order items and update product quantities
-    const orderItems: OrderItemWithProduct[] = [];
-    for (const item of items) {
-      const orderItem = await prisma.orderItem.create({
+        });
+      } else {
+        // If client exists, update their information
+        client = await prisma.client.update({
+          where: { id: client.id },
+          data: {
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+          },
+        });
+      }
+      let subtotal = 0;
+      // Check if all products exist and have enough quantity, and calculate subtotal
+      for (const item of items) {
+        const product = await prisma.product.findUnique({
+          where: { id: item.productId },
+        });
+        if (!product) {
+          throw new NotFoundException(`Product with ID ${item.productId} not found`);
+        }
+        if (product.count < item.quantity) {
+          throw new BadRequestException(
+            `Product ${product.name} has only ${product.count} items in stock, but ${item.quantity} requested`,
+          );
+        }
+        // Base price calculation - actual billing will be calculated on return
+        subtotal += item.quantity * product.price;
+      }
+      const tax = Math.round(subtotal * taxPercent / 100);
+      const total = subtotal + tax;
+      // Create order with the existing or new customer
+      const newOrder = await prisma.order.create({
         data: {
-          orderId: newOrder.id,
-          productId: item.productId,
-          quantity: item.quantity,
-          returned: 0,
+          clientId: client.id,
+          status: 'PENDING',
+          fromDate: startDate,
+          toDate: null, // Will be set when returned
+          subtotal,
+          advancePayment: advancePayment || 0,
+          tax,
+          total,
+          createdAt: startDate, // Set createdAt to the user-selected start time
         },
         include: {
-          product: {
+          client: {
             select: {
               id: true,
-              name: true,
-              size: true,
-              price: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
             },
           },
         },
       });
-      // Update product quantity
-      await prisma.product.update({
-        where: { id: item.productId },
-        data: {
-          count: {
-            decrement: item.quantity,
+      // Create order items and update product quantities
+      const orderItems: OrderItemWithProduct[] = [];
+      for (const item of items) {
+        const orderItem = await prisma.orderItem.create({
+          data: {
+            orderId: newOrder.id,
+            productId: item.productId,
+            quantity: item.quantity,
+            returned: 0,
           },
-        },
-      });
-      orderItems.push(orderItem);
-    }
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                size: true,
+                price: true,
+              },
+            },
+          },
+        });
+        // Update product quantity
+        await prisma.product.update({
+          where: { id: item.productId },
+          data: {
+            count: {
+              decrement: item.quantity,
+            },
+          },
+        });
+        orderItems.push(orderItem);
+      }
+      return {
+        ...newOrder,
+        items: orderItems,
+      };
+    });
     return {
-      ...newOrder,
-      items: orderItems,
+      order,
     };
-  });
-  return {
-    order,
-  };
-}
+  }
 
   async findAll() {
     const orders = await this.prisma.order.findMany({
@@ -337,7 +347,10 @@ async createWithCustomer(createOrderWithCustomerDto: CreateOrderWithCustomerDto)
 
     const updatedOrder = await this.prisma.order.update({
       where: { id },
-      data: { status },
+      data: { 
+        status,
+        returnedAt: status === 'RETURNED' ? new Date() : null
+      },
       include: {
         client: {
           select: {
@@ -459,21 +472,41 @@ async createWithCustomer(createOrderWithCustomerDto: CreateOrderWithCustomerDto)
       const totalRented = orderItems.reduce((sum, item) => sum + item.quantity, 0);
       const totalReturned = orderItems.reduce((sum, item) => sum + item.returned, 0);
 
-      let newStatus: OrderStatus;
-      if (totalReturned === 0) {
-        newStatus = 'PENDING';
-      } else if (totalReturned < totalRented) {
-        newStatus = 'PARTIALLY_RETURNED';
-      } else {
+      let newStatus = order.status;
+      if (totalReturned === totalRented) {
         newStatus = 'RETURNED' as OrderStatus;
       }
 
-      // Update order status
+      // Calculate return amount and advance usage
+      let returnAmount = 0;
+      for (const returnItem of items) {
+        const orderItem = returnResults.find(r => r.id === returnItem.orderItemId);
+        if (orderItem) {
+          returnAmount += orderItem.product.price * returnItem.returnQuantity;
+        }
+      }
+      
+      // Apply time multiplier
+      if (order.fromDate) {
+        const startDate = new Date(order.fromDate);
+        const now = new Date();
+        const hours = Math.ceil((now.getTime() - startDate.getTime()) / (1000 * 60 * 60));
+        const multiplier = hours <= 24 ? 1 : Math.floor(hours / 24) + ((hours % 24) / 24);
+        returnAmount *= multiplier;
+      }
+      
+      // Calculate advance to use (only if not already used)
+      const remainingAdvance = order.advancePayment - order.advanceUsed;
+      const advanceToUse = Math.min(remainingAdvance, returnAmount);
+      const newAdvanceUsed = order.advanceUsed + advanceToUse;
+      
+      // Update order status and advance used
       await prisma.order.update({
         where: { id },
         data: { 
           status: newStatus,
-          updatedAt: new Date(),
+          returnedAt: newStatus === 'RETURNED' ? new Date() : order.returnedAt,
+          advanceUsed: newAdvanceUsed
         },
       });
 
@@ -487,41 +520,46 @@ async createWithCustomer(createOrderWithCustomerDto: CreateOrderWithCustomerDto)
   }
 
   async remove(id: number) {
-    await this.prisma.$transaction(async (prisma) => {
-      const order = await prisma.order.findUnique({
-        where: { id },
-        include: {
-          items: true,
-        },
-      });
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+    });
 
-      if (!order) {
-        throw new NotFoundException(`Order with ID ${id} not found`);
-      }
+    if (!order) {
+      throw new NotFoundException(`Order with ID ${id} not found`);
+    }
 
-      // Return all items to inventory before deleting
-      for (const item of order.items) {
-        const remainingQuantity = item.quantity - item.returned;
-        if (remainingQuantity > 0) {
-          await prisma.product.update({
-            where: { id: item.productId },
-            data: {
-              count: {
-                increment: remainingQuantity,
-              },
-            },
-          });
-        }
-      }
-
-      // Delete order (cascade will delete order items)
-      await prisma.order.delete({
-        where: { id },
-      });
+    await this.prisma.order.delete({
+      where: { id },
     });
 
     return {
       message: 'Order deleted successfully',
+    };
+  }
+
+  async checkClientRating(phone: string) {
+    const client = await this.prisma.client.findUnique({
+      where: { phone },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        phone: true,
+        rating: true,
+      },
+    });
+
+    if (!client) {
+      return {
+        exists: false,
+        message: 'Client not found',
+      };
+    }
+
+    return {
+      exists: true,
+      client,
+      warning: client.rating === 'bad' ? 'Bu mijoz yomon deb belgilangan!' : null,
     };
   }
 

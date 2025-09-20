@@ -28,6 +28,11 @@ export class OrderController {
     return this.orderService.createWithCustomer(createOrderWithCustomerDto);
   }
 
+  @Get('check-client/:phone')
+  checkClientRating(@Param('phone') phone: string) {
+    return this.orderService.checkClientRating(phone);
+  }
+
   @Get()
   findAll() {
     return this.orderService.findAll();

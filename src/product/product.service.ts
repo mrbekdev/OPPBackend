@@ -72,7 +72,7 @@ export class ProductService {
     }
 
     await this.prisma.product.delete({
-      where: { id },
+      where: { id: id },
     });
 
     return {

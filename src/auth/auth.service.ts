@@ -80,6 +80,7 @@ export class AuthService {
         login: user.login,
         firstName: user.firstName,
         lastName: user.lastName,
+        phone:user.phone,
       },
     };
   }

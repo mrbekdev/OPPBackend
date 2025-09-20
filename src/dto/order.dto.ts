@@ -1,5 +1,5 @@
 // dto/order.dto.ts (Agar mavjud bo'lmasa, qo'shing)
-import { IsNotEmpty, IsNumber, IsString, IsDateString, IsArray, IsObject, ValidateNested, IsEnum } from 'class-validator';
+import { IsNotEmpty, IsNumber, IsString, IsDateString, IsArray, IsObject, ValidateNested, IsEnum, IsOptional } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderStatus } from '@prisma/client';
 
@@ -24,13 +24,14 @@ export class CreateOrderDto {
   items: CreateOrderItemDto[];
 
   @IsDateString()
-  fromDate: string;
-
-  @IsDateString()
-  toDate: string;
+  startDateTime: string;
 
   @IsNumber()
   taxPercent: number;
+
+  @IsOptional()
+  @IsNumber()
+  advancePayment?: number;
 }
 
 export class CreateCustomerDto {
@@ -59,13 +60,14 @@ export class CreateOrderWithCustomerDto {
   items: CreateOrderItemDto[];
 
   @IsDateString()
-  fromDate: string;
-
-  @IsDateString()
-  toDate: string;
+  startDateTime: string;
 
   @IsNumber()
   taxPercent: number;
+
+  @IsOptional()
+  @IsNumber()
+  advancePayment?: number;
 }
 
 export class UpdateOrderStatusDto {
