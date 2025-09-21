@@ -76,13 +76,13 @@ export class OrderService {
         data: {
           clientId,
           status: 'PENDING',
-          fromDate: startDate,
+          fromDate: null, // Not used anymore, start time stored in createdAt
           toDate: null, // Will be set when returned
           subtotal,
           advancePayment: advancePayment || 0,
           tax,
           total,
-          createdAt: startDate, 
+          createdAt: startDate, // Store start time in createdAt
         },
         include: {
           client: {
@@ -198,13 +198,13 @@ export class OrderService {
         data: {
           clientId: client.id,
           status: 'PENDING',
-          fromDate: startDate,
+          fromDate: null, // Not used anymore, start time stored in createdAt
           toDate: null, // Will be set when returned
           subtotal,
           advancePayment: advancePayment || 0,
           tax,
           total,
-          createdAt: startDate, // Set createdAt to the user-selected start time
+          createdAt: startDate, // Store start time in createdAt
         },
         include: {
           client: {
@@ -386,7 +386,7 @@ export class OrderService {
   }
 
   async returnItems(id: number, returnItemsDto: ReturnItemsDto) {
-    const { items } = returnItemsDto;
+    const { items, rentalDays, rentalHours, billingMultiplier } = returnItemsDto;
 
     // Validate items array
     if (!Array.isArray(items) || items.length === 0) {
@@ -403,6 +403,17 @@ export class OrderService {
       }
     });
 
+    // Validate duration data if provided
+    if (rentalDays !== undefined && (typeof rentalDays !== 'number' || rentalDays < 0)) {
+      throw new BadRequestException('rentalDays must be a non-negative number');
+    }
+    if (rentalHours !== undefined && (typeof rentalHours !== 'number' || rentalHours < 0 || rentalHours >= 24)) {
+      throw new BadRequestException('rentalHours must be a number between 0 and 23');
+    }
+    if (billingMultiplier !== undefined && (typeof billingMultiplier !== 'number' || billingMultiplier <= 0)) {
+      throw new BadRequestException('billingMultiplier must be a positive number');
+    }
+
     const result = await this.prisma.$transaction(async (prisma) => {
       const order = await prisma.order.findUnique({
         where: { id },
@@ -416,10 +427,35 @@ export class OrderService {
       }
 
       const returnResults: OrderItemWithProduct[] = [];
+      const returnRecords: any[] = [];
+
+      // Calculate duration if not provided
+      let calculatedDays = rentalDays || 0;
+      let calculatedHours = rentalHours || 0;
+      let calculatedMultiplier = billingMultiplier || 1;
+
+      if (!billingMultiplier && order.createdAt) {
+        const startDate = new Date(order.createdAt);
+        const now = new Date();
+        const totalHours = Math.ceil((now.getTime() - startDate.getTime()) / (1000 * 60 * 60));
+        calculatedDays = Math.floor(totalHours / 24);
+        calculatedHours = totalHours % 24;
+        calculatedMultiplier = totalHours <= 24 ? 1 : 1 + ((totalHours - 24) / 24);
+      }
 
       for (const returnItem of items) {
         const orderItem = await prisma.orderItem.findUnique({
           where: { id: returnItem.orderItemId },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                size: true,
+                price: true,
+              },
+            },
+          },
         });
 
         if (!orderItem || orderItem.orderId !== id) {
@@ -431,6 +467,22 @@ export class OrderService {
             `Cannot return ${returnItem.returnQuantity} items for order item ${returnItem.orderItemId}. Only ${orderItem.quantity - orderItem.returned} items available to return.`,
           );
         }
+
+        // Calculate return amount for this specific item
+        const itemReturnAmount = orderItem.product.price * returnItem.returnQuantity * calculatedMultiplier;
+
+        // Create return record for detailed tracking
+        const returnRecord = await (prisma as any).returnRecord.create({
+          data: {
+            orderItemId: returnItem.orderItemId,
+            returnQuantity: returnItem.returnQuantity,
+            rentalDays: calculatedDays,
+            rentalHours: calculatedHours,
+            billingMultiplier: calculatedMultiplier,
+            returnAmount: itemReturnAmount,
+          },
+        });
+        returnRecords.push(returnRecord);
 
         // Update order item returned quantity
         const updatedOrderItem = await prisma.orderItem.update({
@@ -475,47 +527,47 @@ export class OrderService {
       let newStatus = order.status;
       if (totalReturned === totalRented) {
         newStatus = 'RETURNED' as OrderStatus;
+      } else if (totalReturned > 0) {
+        newStatus = 'PARTIALLY_RETURNED' as OrderStatus;
       }
 
-      // Calculate return amount and advance usage
-      let returnAmount = 0;
-      for (const returnItem of items) {
-        const orderItem = returnResults.find(r => r.id === returnItem.orderItemId);
-        if (orderItem) {
-          returnAmount += orderItem.product.price * returnItem.returnQuantity;
-        }
-      }
-      
-      // Apply time multiplier
-      if (order.fromDate) {
-        const startDate = new Date(order.fromDate);
-        const now = new Date();
-        const hours = Math.ceil((now.getTime() - startDate.getTime()) / (1000 * 60 * 60));
-        const multiplier = hours <= 24 ? 1 : Math.floor(hours / 24) + ((hours % 24) / 24);
-        returnAmount *= multiplier;
-      }
+      // Calculate total return amount from return records
+      const totalReturnAmount = returnRecords.reduce((sum, record) => sum + record.returnAmount, 0);
       
       // Calculate advance to use (only if not already used)
       const remainingAdvance = order.advancePayment - order.advanceUsed;
-      const advanceToUse = Math.min(remainingAdvance, returnAmount);
-      const newAdvanceUsed = order.advanceUsed + advanceToUse;
+      const advanceToUse = Math.min(remainingAdvance, totalReturnAmount);
       
-      // Update order status and advance used
+      // Update order status, advance used, and final total
+      const updateData: any = {
+        status: newStatus,
+        advanceUsed: Math.min(order.advancePayment, totalReturnAmount),
+        total: totalReturnAmount, // Store the final calculated amount
+      };
+      
+      // Always update these fields with calculated values when returning
+      updateData.rentalDays = calculatedDays;
+      updateData.rentalHours = calculatedHours;
+      updateData.billingMultiplier = calculatedMultiplier;
+      
+      // Set returnedAt timestamp only when all items are returned
+      if (newStatus === 'RETURNED') {
+        updateData.returnedAt = new Date();
+      }
+      // For partial returns, don't set returnedAt - keep order active
+      
       await prisma.order.update({
         where: { id },
-        data: { 
-          status: newStatus,
-          returnedAt: newStatus === 'RETURNED' ? new Date() : order.returnedAt,
-          advanceUsed: newAdvanceUsed
-        },
+        data: updateData,
       });
 
-      return returnResults;
+      return { returnResults, returnRecords };
     });
 
     return {
       message: 'Items returned successfully',
-      returnedItems: result,
+      returnedItems: result.returnResults,
+      returnRecords: result.returnRecords,
     };
   }
 
@@ -603,6 +655,110 @@ export class OrderService {
         })),
       })),
       total: orders.length,
+    };
+  }
+
+  async getReturnRecords() {
+    const returnRecords = await (this.prisma as any).returnRecord.findMany({
+      include: {
+        orderItem: {
+          include: {
+            order: {
+              select: {
+                id: true,
+                clientId: true,
+                createdAt: true,
+              }
+            },
+            product: {
+              select: {
+                id: true,
+                name: true,
+                size: true,
+                price: true,
+                weight: true,
+              }
+            }
+          }
+        }
+      },
+      orderBy: {
+        returnedAt: 'desc'
+      }
+    });
+
+    return {
+      returnRecords: returnRecords.map(record => ({
+        id: record.id,
+        orderId: record.orderItem.order.id,
+        customerId: record.orderItem.order.clientId,
+        productId: record.orderItem.product.id,
+        productName: record.orderItem.product.name,
+        productSize: record.orderItem.product.size,
+        productPrice: record.orderItem.product.price,
+        productWeight: record.orderItem.product.weight || 0,
+        returnQuantity: record.returnQuantity,
+        rentalDays: record.rentalDays,
+        rentalHours: record.rentalHours,
+        billingMultiplier: record.billingMultiplier,
+        returnAmount: record.returnAmount,
+        returnedAt: record.returnedAt,
+        orderCreatedAt: record.orderItem.order.createdAt,
+      }))
+    };
+  }
+
+  async updateStartTime(id: number, startDateTime: string) {
+    const startDate = new Date(startDateTime);
+    if (isNaN(startDate.getTime())) {
+      throw new BadRequestException('Invalid startDateTime provided');
+    }
+
+    const order = await this.prisma.order.findUnique({
+      where: { id },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order with ID ${id} not found`);
+    }
+
+    const updatedOrder = await this.prisma.order.update({
+      where: { id },
+      data: {
+        createdAt: startDate,
+        fromDate: null, // Keep fromDate as null since we use createdAt
+      },
+      include: {
+        client: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+        items: {
+          select: {
+            id: true,
+            productId: true,
+            quantity: true,
+            returned: true,
+            product: {
+              select: {
+                id: true,
+                name: true,
+                size: true,
+                price: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      message: 'Order start time updated successfully',
+      order: updatedOrder,
     };
   }
 }

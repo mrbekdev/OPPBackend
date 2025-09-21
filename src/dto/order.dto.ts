@@ -91,4 +91,16 @@ export class ReturnItemsDto {
   @ValidateNested({ each: true })
   @Type(() => ReturnItemDto)
   items: ReturnItemDto[];
+
+  @IsOptional()
+  @IsNumber()
+  rentalDays?: number;
+
+  @IsOptional()
+  @IsNumber()
+  rentalHours?: number;
+
+  @IsOptional()
+  @IsNumber()
+  billingMultiplier?: number;
 }

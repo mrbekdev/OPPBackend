@@ -57,11 +57,21 @@ export class OrderController {
   }
 
   @Post(':id/return')
-  returnItems(
+  async returnItems(@Param('id') id: string, @Body() returnItemsDto: ReturnItemsDto) {
+    return this.orderService.returnItems(+id, returnItemsDto);
+  }
+
+  @Get('return-records')
+  async getReturnRecords() {
+    return this.orderService.getReturnRecords();
+  }
+
+  @Patch(':id/edit-start-time')
+  updateStartTime(
     @Param('id', ParseIntPipe) id: number,
-    @Body() returnItemsDto: ReturnItemsDto,
+    @Body() body: { startDateTime: string },
   ) {
-    return this.orderService.returnItems(id, returnItemsDto);
+    return this.orderService.updateStartTime(id, body.startDateTime);
   }
 
   @Delete(':id')
